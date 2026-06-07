@@ -474,7 +474,7 @@ function ScannerTab({ onScanComplete }) {
     // In production: const result = await Tesseract.recognize(image, 'eng');
     setOcrText("Patient: Adaeze Okonkwo\nDate: 08/05/2026\nDr. B. Okafor\n\nRx:\n1. Panadol 500mg - 1 tab TDS x 5 days\n2. Amoxil 500mg cap - 1 BD x 7 days\n3. Brufen 400mg - 1 tab with food BD\n\nNote: Take full antibiotic course. Return if no improvement in 3 days.");
     setLoading(false); setLoadingMsg("");
-  }, [image]);
+  }, []);
 
   const process = async (text) => {
     setLoading(true); setLoadingMsg("AI extracting medications…");
