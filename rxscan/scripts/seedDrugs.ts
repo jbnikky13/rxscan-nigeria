@@ -26,7 +26,7 @@ async function seed() {
   for (const drug of drugs) {
     try {
       const res = await axios.get(
-        `https://api.fda.gov/drug/label.json?search=openfda.generic_name:${drug}&limit=1`
+        https://api.fda.gov/drug/label.json?search=openfda.generic_name:${drug}&limit=1
       );
       const label = res.data.results?.[0];
       if (!label) {
