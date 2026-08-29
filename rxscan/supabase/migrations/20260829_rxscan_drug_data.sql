@@ -1,6 +1,8 @@
 -- RxScan Nigeria: authoritative drug-data extensions
 -- Sources: NLM RxNorm, NCBI PubMed, Nigeria Essential Medicines List / WHO repository.
--- This migration is intentionally additive and idempotent.
+-- Additive and idempotent.
+
+create extension if not exists pgcrypto;
 
 create table if not exists public.data_sources (
   id uuid primary key default gen_random_uuid(),
@@ -31,6 +33,10 @@ alter table public.drug_interactions
   add column if not exists source_version text,
   add column if not exists evidence_level text,
   add column if not exists verified_at timestamptz;
+
+create unique index if not exists uq_ingredients_rxcui on public.ingredients(rxcui) where rxcui is not null;
+create unique index if not exists uq_products_source on public.products(source_system, source_id) where source_system is not null and source_id is not null;
+create unique index if not exists uq_product_ingredient on public.product_ingredient_map(product_id, ingredient_id);
 
 create table if not exists public.medicine_list_memberships (
   id uuid primary key default gen_random_uuid(),
@@ -81,10 +87,9 @@ values
 ('RxNorm','U.S. National Library of Medicine','https://rxnav.nlm.nih.gov/','current','Drug concepts, ingredients, products and identifiers. RxNav drug-interaction endpoints were discontinued in January 2024; RxNorm is not treated as the interaction authority.'),
 ('PubMed','U.S. National Library of Medicine / NCBI','https://pubmed.ncbi.nlm.nih.gov/','current','Literature evidence and citations for drug-interaction records; PubMed search is evidence retrieval, not automatic clinical adjudication.'),
 ('Nigeria Essential Medicines List','Federal Ministry of Health and Social Welfare / WHO repository','https://extranet.who.int/cpcd/health-legislation/nigeria-essential-medicine-list-7th-edition','7th edition (2020)','National essential-medicine list. Verify against the latest Nigerian regulator/formulary before labeling a product as approved or marketed in Nigeria.'),
-('WHO Model List of Essential Medicines','World Health Organization','https://www.who.int/groups/expert-committee-on-selection-and-use-of-essential-medicines/essential-medicines-lists','24th list (2025)','Supplementary international essential-medicine reference; not a substitute for Nigerian regulatory authorization.')
+('WHO Model List of Essential Medicines','World Health Organization','https://www.who.int/publications/i/item/B09474','24th list (2025)','Supplementary international essential-medicine reference; not a substitute for Nigerian regulatory authorization.')
 on conflict(name) do update set publisher=excluded.publisher,source_url=excluded.source_url,version=excluded.version,notes=excluded.notes,retrieved_at=now();
 
--- RLS: reference data is readable by the public application; writes should use the server-side service role.
 alter table public.data_sources enable row level security;
 alter table public.medicine_list_memberships enable row level security;
 alter table public.product_sources enable row level security;
