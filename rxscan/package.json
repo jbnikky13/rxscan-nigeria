@@ -1,6 +1,6 @@
 {
   "name": "rxscan",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "dependencies": {
     "@supabase/supabase-js": "^2.107.0",
@@ -12,6 +12,7 @@
     "@types/react": "^19.2.15",
     "@types/react-dom": "^19.2.3",
     "axios": "^1.17.0",
+    "pdf-parse": "^1.1.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-scripts": "^5.0.1",
@@ -23,6 +24,7 @@
     "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test",
+    "sync:drug-data": "node scripts/syncAuthoritativeDrugData.mjs",
     "eject": "react-scripts eject"
   },
   "eslintConfig": {
