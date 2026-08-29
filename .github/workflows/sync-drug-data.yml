@@ -1,0 +1,41 @@
+name: Sync RxScan drug data
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * 0'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rxscan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: rxscan/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Install PDF extraction utility
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+      - name: Apply database migration
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          if [ -z "$SUPABASE_DB_URL" ]; then
+            echo "SUPABASE_DB_URL is required"; exit 1
+          fi
+          psql "$SUPABASE_DB_URL" -f supabase/migrations/20260829_rxscan_drug_data.sql
+      - name: Sync authoritative data
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          NCBI_EMAIL: ${{ secrets.NCBI_EMAIL }}
+          NCBI_API_KEY: ${{ secrets.NCBI_API_KEY }}
+          MAX_MEDICINES: '1000'
+          MAX_INTERACTION_PAIRS: '500'
+        run: npm run sync:drug-data
