@@ -51,7 +51,7 @@ async function extractNEMLNames(pdfPath) {
   try {
     await execFileAsync('pdftotext', ['-layout', pdfPath, txtPath]);
   } catch {
-    throw new Error('pdftotext is required for NEML extraction. Install Poppler, or provide data/nigeria-neml-7th-edition.txt.');
+    throw new Error('pdftotext is required for NEML extraction.');
   }
   const text = await fs.readFile(txtPath, 'utf8');
   return [...new Set(text.split(/\r?\n/).map(normaliseName).filter(looksLikeMedicine))].slice(0, MAX_MEDICINES);
@@ -72,7 +72,7 @@ async function upsertIngredient(concept) {
     source_id: String(concept.rxcui),
     source_version: 'current',
     verified_at: new Date().toISOString()
-  }, { onConflict: 'rxcui' }).select('id,name,rxcui').single();
+  }, { onConflict: 'source_system,source_id' }).select('id,name,rxcui').single();
   if (error) throw error;
   return data;
 }
@@ -84,8 +84,8 @@ async function upsertProduct(concept, ingredientId) {
     dosage_form: null,
     strength: null,
     route: null,
-    prescription_required: null,
-    available_in_nigeria: null,
+    prescription_required: false,
+    available_in_nigeria: false,
     source_system: 'RxNorm',
     source_id: String(concept.rxcui),
     source_version: 'current',
@@ -93,7 +93,10 @@ async function upsertProduct(concept, ingredientId) {
   }, { onConflict: 'source_system,source_id' }).select('id').single();
   if (error) throw error;
 
-  const map = await supabase.from('product_ingredient_map').upsert({ product_id: data.id, ingredient_id: ingredientId }, { onConflict: 'product_id,ingredient_id' });
+  const map = await supabase.from('product_ingredient_map').upsert(
+    { product_id: data.id, ingredient_id: ingredientId },
+    { onConflict: 'product_id,ingredient_id' }
+  );
   if (map.error) throw map.error;
 
   const src = await supabase.from('product_sources').upsert({
