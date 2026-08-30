@@ -14,13 +14,13 @@ alter table public.products add column if not exists source_id text;
 alter table public.products add column if not exists source_version text;
 alter table public.products add column if not exists verified_at timestamptz;
 
-create unique index if not exists ingredients_source_uidx
-  on public.ingredients(source_system, source_id)
-  where source_system is not null and source_id is not null;
+do $$ begin
+  alter table public.ingredients add constraint ingredients_source_unique unique (source_system, source_id);
+exception when duplicate_object then null; end $$;
 
-create unique index if not exists products_source_uidx
-  on public.products(source_system, source_id)
-  where source_system is not null and source_id is not null;
+do $$ begin
+  alter table public.products add constraint products_source_unique unique (source_system, source_id);
+exception when duplicate_object then null; end $$;
 
 create table if not exists public.product_sources (
   id uuid primary key default gen_random_uuid(),
@@ -68,7 +68,6 @@ create index if not exists interaction_evidence_pmid_idx on public.interaction_e
 alter table public.prescription_scans add column if not exists user_id uuid references auth.users(id) on delete cascade;
 create index if not exists prescription_scans_user_idx on public.prescription_scans(user_id, created_at desc);
 
--- Reference data is publicly readable for medication resolution; all writes are performed by the service role.
 alter table public.ingredients enable row level security;
 alter table public.products enable row level security;
 alter table public.product_ingredient_map enable row level security;
@@ -96,7 +95,6 @@ create policy "public read drug interactions" on public.drug_interactions for se
 drop policy if exists "public read drug aliases" on public.drug_aliases;
 create policy "public read drug aliases" on public.drug_aliases for select using (true);
 
--- Scan history is private to the authenticated owner.
 drop policy if exists "users read own scans" on public.prescription_scans;
 create policy "users read own scans" on public.prescription_scans for select to authenticated using (user_id = auth.uid());
 drop policy if exists "users insert own scans" on public.prescription_scans;
