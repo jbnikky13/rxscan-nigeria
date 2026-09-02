@@ -24,6 +24,7 @@
     "build": "react-scripts build",
     "test": "react-scripts test",
     "sync:drug-data": "node scripts/syncAuthoritativeDrugData.mjs",
+    "verify:drug-data": "node scripts/verifyDrugData.mjs",
     "eject": "react-scripts eject"
   },
   "eslintConfig": {
