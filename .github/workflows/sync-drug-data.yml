@@ -11,7 +11,7 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: rxscan
@@ -27,15 +27,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate required secrets
+        run: |
+          test -n "$SUPABASE_URL" || (echo "Missing SUPABASE_URL repository secret"; exit 1)
+          test -n "$SUPABASE_SERVICE_ROLE_KEY" || (echo "Missing SUPABASE_SERVICE_ROLE_KEY repository secret"; exit 1)
+          test -n "$SUPABASE_DB_URL" || (echo "Missing SUPABASE_DB_URL repository secret"; exit 1)
+          test -n "$NCBI_EMAIL" || (echo "Missing NCBI_EMAIL repository secret"; exit 1)
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           cache-dependency-path: rxscan/package-lock.json
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install --no-audit --no-fund
 
       - name: Install Poppler and PostgreSQL client
         run: sudo apt-get update && sudo apt-get install -y poppler-utils postgresql-client
@@ -47,7 +54,6 @@ jobs:
 
       - name: Apply database migrations
         run: |
-          test -n "$SUPABASE_DB_URL" || (echo "SUPABASE_DB_URL is required"; exit 1)
           cd ..
           supabase db push --db-url "$SUPABASE_DB_URL" --yes
 
