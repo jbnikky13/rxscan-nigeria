@@ -8,6 +8,7 @@ on:
       - '.github/workflows/sync-drug-data.yml'
       - 'supabase/**'
       - 'rxscan/scripts/syncAuthoritativeDrugData.mjs'
+      - 'rxscan/scripts/verifyDrugData.mjs'
       - 'rxscan/package.json'
       - 'rxscan/package-lock.json'
   schedule:
@@ -67,3 +68,6 @@ jobs:
 
       - name: Sync authoritative data
         run: npm run sync:drug-data
+
+      - name: Verify loaded data
+        run: npm run verify:drug-data
