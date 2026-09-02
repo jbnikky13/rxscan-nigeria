@@ -1,7 +1,7 @@
 {
   "buildCommand": "cd rxscan && npm run build",
   "outputDirectory": "rxscan/build",
-  "installCommand": "cd rxscan && npm ci",
+  "installCommand": "cd rxscan && npm install",
   "framework": "create-react-app",
   "rewrites": [
     { "source": "/api/:path*", "destination": "/api/:path*" },
