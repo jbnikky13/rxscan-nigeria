@@ -1,8 +1,10 @@
 // @ts-nocheck
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import Tesseract from "tesseract.js";
-import { resolveDrugName, getProductsByIngredient, getDrugInteractions, saveScan } from "./services/drugResolver";
+import { resolveDrugName, getProductsByIngredient, getDrugInteractions, getMedicineListMemberships, getInteractionEvidence, saveScan, getScanHistory } from "./services/drugResolver";
 import { callClaudeAPI } from "./services/claudeAPI";
+import AuthPanel from "./components/AuthPanel";
+import AuthoritativeDataPanel from "./components/AuthoritativeDataPanel";
 
 // ─── STYLE TOKENS ─────────────────────────────────────────────────────────────
 const SEV = {
@@ -261,14 +263,27 @@ function ScannerTab({ onScanComplete }) {
       ? await getDrugInteractions(allIngIds)
       : [];
 
-    const final = { ...extracted, resolved, drug_interactions };
+    setLoadingMsg("Loading Nigerian medicine-list status and PubMed evidence…");
+
+    const resolvedWithLists = await Promise.all(resolved.map(async (row) => ({
+      ...row,
+      medicine_list_memberships: row.ingredient
+        ? await getMedicineListMemberships(row.ingredient.id)
+        : [],
+    })));
+
+    const interaction_evidence = allIngIds.length > 1
+      ? await getInteractionEvidence(allIngIds)
+      : [];
+
+    const final = { ...extracted, resolved: resolvedWithLists, drug_interactions, interaction_evidence };
 
     // Save scan to Supabase history
     try {
       await saveScan({
         raw_ocr_text: text,
         extracted_medications: extracted.medications,
-        resolved_products: resolved,
+        resolved_products: resolvedWithLists,
         interaction_warnings: drug_interactions,
       });
     } catch (err) {
@@ -386,6 +401,8 @@ function ScannerTab({ onScanComplete }) {
               </div>
             )}
           </div>
+
+          <AuthoritativeDataPanel result={result} />
 
           {/* Prescription meta */}
           <SectionHead icon="📋" title="Prescription Details" />
@@ -827,6 +844,13 @@ export default function App() {
   const [tab, setTab] = useState(0);
   const [history, setHistory] = useState([]);
 
+  const refreshHistory = useCallback(async () => {
+    const scans = await getScanHistory();
+    setHistory(scans ?? []);
+  }, []);
+
+  useEffect(() => { refreshHistory(); }, [refreshHistory]);
+
   return (
     <div style={{ fontFamily: "'Inter','Segoe UI',sans-serif", background: "#f1f5f9", minHeight: "100vh" }}>
       <style>{`@keyframes spin{to{transform:rotate(360deg)}} *{box-sizing:border-box}`}</style>
@@ -834,7 +858,8 @@ export default function App() {
       {/* Header */}
       <div style={{ background: "linear-gradient(135deg,#1e3a5f 0%,#2563eb 100%)", padding: "18px 20px 0", color: "#fff" }}>
         <div style={{ maxWidth: 760, margin: "0 auto" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 4 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 4, position: "relative" }}>
+            <AuthPanel onAuthChange={() => refreshHistory()} />
             <div style={{ background: "rgba(255,255,255,0.15)", borderRadius: 10, padding: "6px 10px", fontSize: 22 }}>💊</div>
             <div>
               <div style={{ fontWeight: 800, fontSize: 19, letterSpacing: "-0.5px" }}>RxScan Nigeria</div>
@@ -864,7 +889,7 @@ export default function App() {
 
       {/* Content */}
       <div style={{ maxWidth: 760, margin: "0 auto", padding: "22px 16px 52px" }}>
-        {tab === 0 && <ScannerTab onScanComplete={(r) => setHistory((h) => [r, ...h])} />}
+        {tab === 0 && <ScannerTab onScanComplete={(r) => { setHistory((h) => [r, ...h]); refreshHistory(); }} />}
         {tab === 1 && <DrugLookupTab />}
         {tab === 2 && <ProductsTab />}
         {tab === 3 && <InteractionsTab />}
