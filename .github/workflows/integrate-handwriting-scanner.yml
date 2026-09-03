@@ -1,0 +1,98 @@
+name: Integrate handwriting scanner
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    if: ${{ !contains(github.event.head_commit.message, 'Integrate handwriting scanner') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Patch scanner
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('rxscan/src/App.tsx')
+          s = p.read_text()
+          old_import = 'import Tesseract from "tesseract.js";\n'
+          new_import = old_import + 'import { recognizePrescriptionHandwriting } from "./services/handwritingOCR";\n'
+          if 'recognizePrescriptionHandwriting' not in s:
+              s = s.replace(old_import, new_import, 1)
+
+          old_state = '  const [ocrText, setOcrText] = useState("");\n'
+          new_state = old_state + '  const [ocrConfidence, setOcrConfidence] = useState(null);\n  const [ocrProvider, setOcrProvider] = useState("");\n'
+          if 'ocrConfidence' not in s:
+              s = s.replace(old_state, new_state, 1)
+
+          start = s.index('  // ── REAL TESSERACT OCR')
+          end = s.index('  // ── PROCESS TEXT THROUGH CLAUDE + SUPABASE', start)
+          replacement = '''  // ── HANDWRITING-FIRST PRESCRIPTION OCR ───────────────────────────────────
+  const runOCR = useCallback(async () => {
+    if (!image) return;
+    setLoading(true);
+    setLoadingMsg("Reading prescription handwriting…");
+    setOcrConfidence(null);
+    setOcrProvider("");
+    try {
+      // Primary: server-side Google Cloud Vision handwriting recognition.
+      const vision = await recognizePrescriptionHandwriting(image);
+      setOcrText(vision.text || "");
+      setOcrConfidence(typeof vision.confidence === "number" ? vision.confidence : null);
+      setOcrProvider(vision.provider || "handwriting OCR");
+    } catch (visionError) {
+      console.warn("Handwriting OCR unavailable; falling back to Tesseract", visionError);
+      setLoadingMsg("Handwriting OCR unavailable — trying local OCR…");
+      try {
+        const local = await Tesseract.recognize(image, "eng", { logger: (m) => console.log(m) });
+        setOcrText(local.data.text || "");
+        setOcrProvider("Tesseract fallback");
+        setOcrConfidence(typeof local.data.confidence === "number" ? local.data.confidence / 100 : null);
+      } catch (err) {
+        setLoadingMsg("OCR failed. Please upload a clearer image or type the prescription manually.");
+        console.error(err);
+      }
+    } finally {
+      setLoading(false);
+      setLoadingMsg("");
+    }
+  }, [image]);
+
+'''
+          s = s[:start] + replacement + s[end:]
+
+          marker = '''          {ocrText && (\n            <div style={{ marginTop: 10, marginBottom: 4 }}>'''
+          if 'HANDWRITING OCR' not in s:
+              insert = '''          {ocrText && (\n            <div style={{ marginTop: 10, marginBottom: 4 }}>'''
+              # Add confidence/status directly before the raw OCR panel.
+              status = '''          {ocrText && (\n            <div style={{ marginTop: 10, marginBottom: 8, padding: "10px 12px", borderRadius: 10, background: ocrConfidence !== null && ocrConfidence < 0.8 ? "#fff7ed" : "#f0fdf4", border: `1px solid ${ocrConfidence !== null && ocrConfidence < 0.8 ? "#fdba74" : "#bbf7d0"}` }}>\n              <div style={{ fontSize: 12, fontWeight: 800, color: ocrConfidence !== null && ocrConfidence < 0.8 ? "#9a3412" : "#166534" }}>\n                {ocrConfidence !== null && ocrConfidence < 0.8 ? "⚠️ Handwriting is unclear — confirmation required" : "✍️ Handwriting OCR complete"}\n              </div>\n              <div style={{ fontSize: 11, color: "#6b7280", marginTop: 3 }}>\n                {ocrProvider}{ocrConfidence !== null ? ` · ${(ocrConfidence * 100).toFixed(0)}% word confidence` : ""}. RxScan will still verify medication names against the authoritative drug database.\n              </div>\n            </div>\n\n          {ocrText && (\n            <div style={{ marginTop: 10, marginBottom: 4 }}>'''
+              s = s.replace(marker, status, 1)
+
+          s = s.replace('Run OCR →', 'Read Prescription →', 1)
+          p.write_text(s)
+          PY
+
+      - name: Validate TypeScript build
+        working-directory: rxscan
+        run: |
+          npm ci
+          npm run build
+
+      - name: Commit integration
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add rxscan/src/App.tsx
+          if git diff --cached --quiet; then
+            echo "No scanner changes needed"
+          else
+            git commit -m "Integrate handwriting scanner"
+            git push
+          fi
