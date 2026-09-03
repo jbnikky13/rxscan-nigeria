@@ -1,62 +1,85 @@
 import { supabase } from './supabaseClient';
 
+function normalizeDrugName(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[×x]/g, ' ')
+    .replace(/\b\d+(?:\.\d+)?\s*(?:mg|mcg|µg|g|kg|ml|iu|units?|%|mmol|mol)\b/gi, ' ')
+    .replace(/\b(?:tablet|tablets|tab|capsule|capsules|cap|injection|injectable|solution|suspension|syrup|cream|ointment|gel|drops?|inhaler|vial|ampoule|ampoules|patch|suppository|oral|iv|im|sc|po)\b/gi, ' ')
+    .replace(/[^a-z0-9+\-. ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Resolve a prescription medicine to the authoritative RxNorm ingredient table. */
 export async function resolveDrugName(name: string) {
   const clean = name.trim();
   if (!clean) return [];
 
-  const { data: aliasMatch, error: aliasError } = await supabase
-    .from('drug_aliases')
-    .select('*, ingredient:ingredient_id(*)')
-    .ilike('alias', `%${clean}%`);
+  // The current production schema does not relate drug_aliases to ingredients,
+  // so do not issue a broken foreign-table join. Search the authoritative
+  // ingredient names directly and rank exact/normalized matches first.
+  const normalized = normalizeDrugName(clean);
+  const searchTerms = [...new Set([clean, normalized, normalized.split(' ').slice(0, 3).join(' ')].filter(Boolean))];
+  const matches: any[] = [];
 
-  if (aliasError) console.error('Alias lookup error:', aliasError);
+  for (const term of searchTerms) {
+    const { data, error } = await supabase
+      .from('ingredients')
+      .select('id,name,rxcui,drug_class,mechanism_of_action,side_effects,contraindications,administration,food_interactions')
+      .ilike('name', `%${term}%`)
+      .limit(25);
+    if (error) {
+      console.error('Ingredient lookup error:', error);
+      continue;
+    }
+    matches.push(...(data ?? []));
+  }
 
-  const { data: ingredientMatch, error: ingredientError } = await supabase
-    .from('ingredients')
-    .select('*')
-    .ilike('name', `%${clean}%`);
-
-  if (ingredientError) console.error('Ingredient lookup error:', ingredientError);
-
-  const ingredients = [
-    ...(aliasMatch?.map((a: any) => a.ingredient).filter(Boolean) ?? []),
-    ...(ingredientMatch ?? []),
-  ];
-
-  return ingredients.filter(
-    (v: any, i: number, arr: any[]) => arr.findIndex((x: any) => x.id === v.id) === i
-  );
+  const unique = matches.filter((v, i, arr) => arr.findIndex(x => x.id === v.id) === i);
+  return unique.sort((a, b) => {
+    const an = normalizeDrugName(a.name);
+    const bn = normalizeDrugName(b.name);
+    return Number(bn === normalized) - Number(an === normalized) || an.length - bn.length;
+  });
 }
 
 export async function getProductsByIngredient(ingredientId: string) {
   if (!ingredientId) return [];
   const { data, error } = await supabase
-    .from('product_ingredient_map')
-    .select(`*, product:product_id (id, brand_name, manufacturer, dosage_form, strength, route, nafdac_number, available_in_nigeria, nhis_covered, prescription_required, source_system, source_id, source_version, verified_at)`)
+    .from('product_ingredients')
+    .select(`product:product_id (id, name, rxcui, tty, source_id, source_updated_at, created_at, updated_at)`)
     .eq('ingredient_id', ingredientId);
-  if (error) console.error('Product lookup error:', error);
+  if (error) {
+    console.error('Product lookup error:', error);
+    return [];
+  }
   return data?.map((row: any) => row.product).filter(Boolean) ?? [];
 }
 
-/** National-list membership is evidence of inclusion in the named list, not blanket regulatory approval. */
+/** NEML membership is evidence of inclusion in the named national list. */
 export async function getMedicineListMemberships(ingredientId: string) {
   if (!ingredientId) return [];
   const { data, error } = await supabase
-    .from('medicine_list_memberships')
-    .select('id, list_name, country_code, edition, status, source_url, retrieved_at')
+    .from('neml_memberships')
+    .select('id, medicine_name, edition, dosage_form, strength, evidence, source_id, created_at')
     .eq('ingredient_id', ingredientId)
     .order('edition', { ascending: false });
-  if (error) console.error('Medicine-list lookup error:', error);
+  if (error) {
+    console.error('NEML membership lookup error:', error);
+    return [];
+  }
   return data ?? [];
 }
 
+/** Find interactions where both ingredients are among the medicines being checked. */
 export async function getDrugInteractions(ingredientIds: string[]) {
   const ids = [...new Set(ingredientIds.filter(Boolean))];
   if (ids.length < 2) return [];
 
   const { data, error } = await supabase
     .from('drug_interactions')
-    .select(`*, ingredient_a:ingredient_a_id (id, name, rxcui), ingredient_b:ingredient_b_id (id, name, rxcui)`)
+    .select(`id, ingredient_a_id, ingredient_b_id, ingredient_a:ingredient_a_id (id, name, rxcui), ingredient_b:ingredient_b_id (id, name, rxcui)`)
     .in('ingredient_a_id', ids)
     .in('ingredient_b_id', ids);
 
@@ -65,25 +88,26 @@ export async function getDrugInteractions(ingredientIds: string[]) {
     return [];
   }
 
-  // De-duplicate reversed pairs defensively in case historical data contains both orientations.
   const seen = new Set<string>();
   return (data ?? []).filter((row: any) => {
-    if (!ids.includes(row.ingredient_a_id) || !ids.includes(row.ingredient_b_id)) return false;
-    const key = [row.ingredient_a_id, row.ingredient_b_id].sort().join(':');
+    const a = row.ingredient_a_id;
+    const b = row.ingredient_b_id;
+    if (!ids.includes(a) || !ids.includes(b) || a === b) return false;
+    const key = [a, b].sort().join(':');
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
 }
 
-/** PubMed bibliographic evidence associated with a drug pair. */
+/** PubMed bibliographic evidence associated with the selected drug pairs. */
 export async function getInteractionEvidence(ingredientIds: string[]) {
   const ids = [...new Set(ingredientIds.filter(Boolean))];
   if (ids.length < 2) return [];
 
   const { data, error } = await supabase
     .from('interaction_evidence')
-    .select('id, ingredient_a_id, ingredient_b_id, pmid, title, journal, publication_year, source_url, retrieved_at')
+    .select('id, interaction_id, ingredient_a_id, ingredient_b_id, pmid, title, journal, publication_year, source_id, source_url, retrieved_at')
     .in('ingredient_a_id', ids)
     .in('ingredient_b_id', ids)
     .order('publication_year', { ascending: false });
@@ -95,8 +119,10 @@ export async function getInteractionEvidence(ingredientIds: string[]) {
 
   const seen = new Set<string>();
   return (data ?? []).filter((row: any) => {
-    if (!ids.includes(row.ingredient_a_id) || !ids.includes(row.ingredient_b_id)) return false;
-    const pair = [row.ingredient_a_id, row.ingredient_b_id].sort().join(':');
+    const a = row.ingredient_a_id;
+    const b = row.ingredient_b_id;
+    if (!ids.includes(a) || !ids.includes(b) || a === b) return false;
+    const pair = [a, b].sort().join(':');
     const key = `${pair}:${row.pmid}`;
     if (seen.has(key)) return false;
     seen.add(key);
@@ -105,7 +131,10 @@ export async function getInteractionEvidence(ingredientIds: string[]) {
 }
 
 export async function getAllIngredients() {
-  const { data, error } = await supabase.from('ingredients').select('*').order('name');
+  const { data, error } = await supabase
+    .from('ingredients')
+    .select('id,name,rxcui,drug_class,mechanism_of_action,side_effects,contraindications,administration,food_interactions')
+    .order('name');
   if (error) console.error('Ingredient lookup error:', error);
   return data ?? [];
 }
@@ -113,8 +142,8 @@ export async function getAllIngredients() {
 export async function getAllProducts() {
   const { data, error } = await supabase
     .from('products')
-    .select(`*, product_ingredient_map (ingredient:ingredient_id (id, name, rxcui, drug_class))`)
-    .order('brand_name');
+    .select(`id,name,rxcui,tty,source_id,source_updated_at,created_at,updated_at, product_ingredients (ingredient:ingredient_id (id, name, rxcui, drug_class))`)
+    .order('name');
   if (error) console.error('Product listing error:', error);
   return data ?? [];
 }
@@ -122,7 +151,7 @@ export async function getAllProducts() {
 export async function getAllInteractions() {
   const { data, error } = await supabase
     .from('drug_interactions')
-    .select(`*, ingredient_a:ingredient_a_id (id, name, rxcui), ingredient_b:ingredient_b_id (id, name, rxcui)`);
+    .select(`id, ingredient_a_id, ingredient_b_id, ingredient_a:ingredient_a_id (id, name, rxcui), ingredient_b:ingredient_b_id (id, name, rxcui)`);
   if (error) console.error('Interaction listing error:', error);
   return data ?? [];
 }
@@ -134,9 +163,6 @@ export async function saveScan(payload: {
   interaction_warnings: any;
 }) {
   const { data: { user } } = await supabase.auth.getUser();
-
-  // Scan history is protected by RLS. Anonymous users can still scan; their
-  // result remains in memory and is not persisted until they authenticate.
   if (!user) return null;
 
   const { data, error } = await supabase
