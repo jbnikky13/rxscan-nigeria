@@ -23,8 +23,10 @@ if (!s.includes('          <AuthoritativeDataPanel result={result} />')) {
 }
 
 const oldAppState = `  const [tab, setTab] = useState(0);\n  const [history, setHistory] = useState([]);`;
-const newAppState = `  const [tab, setTab] = useState(0);\n  const [history, setHistory] = useState([]);\n\n  const refreshHistory = useCallback(async () => {\n    const scans = await getScanHistory();\n    setHistory(scans ?? []);\n  }, []);\n\n  useEffect(() => { refreshHistory(); }, [refreshHistory]);`;
-if (s.includes(oldAppState)) s = s.replace(oldAppState, newAppState);
+const refreshBlock = `\n\n  const refreshHistory = useCallback(async () => {\n    const scans = await getScanHistory();\n    setHistory(scans ?? []);\n  }, []);\n\n  useEffect(() => { refreshHistory(); }, [refreshHistory]);`;
+if (s.includes(oldAppState) && !s.includes('const refreshHistory = useCallback')) {
+  s = s.replace(oldAppState, newAppState = oldAppState + refreshBlock);
+}
 
 const oldScan = `{tab === 0 && <ScannerTab onScanComplete={(r) => setHistory((h) => [r, ...h])} />}`;
 s = s.replace(oldScan, `{tab === 0 && <ScannerTab onScanComplete={(r) => { setHistory((h) => [r, ...h]); refreshHistory(); }} />}`);
@@ -34,6 +36,9 @@ if (!s.includes('<AuthPanel onAuthChange')) {
   s = s.replace(headerNeedle, `<div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 4, position: "relative" }}>\n            <AuthPanel onAuthChange={() => refreshHistory()} />`);
 }
 
-if (s === original) throw new Error('No changes made');
+if (s === original) {
+  console.log('RxScan App integration already up to date; no changes needed');
+  process.exit(0);
+}
 fs.writeFileSync(file, s);
 console.log('RxScan App integration patched successfully');
