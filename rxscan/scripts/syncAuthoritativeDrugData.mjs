@@ -61,26 +61,18 @@ async function extractNemlNames() {
 }
 
 function normalizeRxName(value) {
-  return value
-    .toLowerCase()
-    .replace(/[×x]/g, ' ')
-    .replace(/\b\d+(?:\.\d+)?\s*(?:mg|mcg|µg|g|kg|ml|mL|iu|units?|%|mmol|mol)\b/gi, ' ')
+  return value.toLowerCase().replace(/[×x]/g, ' ')
+    .replace(/\b\d+(?:\.\d+)?\s*(?:mg|mcg|µg|g|kg|ml|iu|units?|%|mmol|mol)\b/gi, ' ')
     .replace(/\b(?:tablet|tablets|tab|capsule|capsules|cap|injection|injectable|solution|suspension|syrup|cream|ointment|gel|drops?|inhaler|vial|ampoule|ampoules|patch|suppository|oral|iv|im|sc|po)\b/gi, ' ')
-    .replace(/[(),;:/\\]+/g, ' ')
-    .replace(/[^a-z0-9+\-. ]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+    .replace(/[(),;:/\\]+/g, ' ').replace(/[^a-z0-9+\-. ]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 function rxnormQueryVariants(name) {
   const normalized = normalizeRxName(name);
   const words = normalized.split(' ').filter(Boolean);
   const variants = [name.trim(), normalized];
-  if (words.length > 1) {
-    variants.push(words.slice(0, 2).join(' '));
-    variants.push(words.slice(0, 3).join(' '));
-    if (words.length > 3) variants.push(words.slice(0, 4).join(' '));
-  }
+  if (words.length > 1) variants.push(words.slice(0, 2).join(' '), words.slice(0, 3).join(' '));
+  if (words.length > 3) variants.push(words.slice(0, 4).join(' '));
   return [...new Set(variants.filter(v => v.length >= 3))];
 }
 
@@ -90,18 +82,15 @@ async function rxnormSearch(name) {
     const concepts = (data?.drugGroup?.conceptGroup || []).flatMap(group => group.conceptProperties || []).filter(Boolean);
     if (concepts.length) return concepts;
   }
-
   const approximate = await json(`${RXNAV}/approximateTerm.json?term=${encodeURIComponent(normalizeRxName(name))}&maxEntries=10`);
   const candidates = approximate?.approximateGroup?.candidate || [];
   const concepts = [];
-  for (const candidate of candidates) {
-    if (!candidate.rxcui) continue;
+  for (const item of candidates) {
+    if (!item.rxcui) continue;
     try {
-      const props = await json(`${RXNAV}/rxcui/${encodeURIComponent(candidate.rxcui)}/properties.json`);
+      const props = await json(`${RXNAV}/rxcui/${encodeURIComponent(item.rxcui)}/properties.json`);
       if (props?.properties) concepts.push(props.properties);
-    } catch {
-      // Ignore an individual approximate candidate.
-    }
+    } catch {}
   }
   return concepts;
 }
@@ -109,57 +98,58 @@ async function rxnormSearch(name) {
 async function rxnormProducts(rxcui) {
   try {
     const data = await json(`${RXNAV}/rxcui/${encodeURIComponent(rxcui)}/related.json?tty=SCD%2BSBD%2BGPCK%2BBPCK`);
-    return (data?.relatedGroup?.conceptGroup || []).flatMap(group => group.conceptProperties || []).filter(Boolean).slice(0, MAX_PRODUCTS_PER_MEDICINE);
+    return (data?.allRelatedGroup?.conceptGroup || data?.relatedGroup?.conceptGroup || [])
+      .flatMap(group => group.conceptProperties || [])
+      .filter(c => ['SCD', 'SBD', 'GPCK', 'BPCK'].includes(c.tty))
+      .slice(0, MAX_PRODUCTS_PER_MEDICINE);
   } catch {
     return [];
   }
 }
 
 function pickIngredientConcept(concepts) {
-  return concepts
-    .filter(c => ['IN', 'PIN', 'MIN'].includes(c.tty))
+  return concepts.filter(c => ['IN', 'PIN', 'MIN'].includes(c.tty))
     .sort((a, b) => (a.name || '').length - (b.name || '').length)[0] || null;
 }
 
 async function upsertIngredient(concept, rxSource) {
-  const { data, error } = await db.from('ingredients').upsert({
-    name: concept.name,
-    rxcui: String(concept.rxcui),
-    source_id: rxSource,
-    source_updated_at: new Date().toISOString()
-  }, { onConflict: 'rxcui' }).select('id,name,rxcui').single();
-  if (error) throw error;
+  const { data: existing, error: lookupError } = await db.from('ingredients').select('id,name,rxcui').eq('rxcui', String(concept.rxcui)).limit(1).maybeSingle();
+  if (lookupError) throw lookupError;
+  if (existing) return existing;
+  const { data, error } = await db.from('ingredients').insert({ name: concept.name, rxcui: String(concept.rxcui), source_id: rxSource, source_updated_at: new Date().toISOString() }).select('id,name,rxcui').single();
+  if (error) {
+    const retry = await db.from('ingredients').select('id,name,rxcui').eq('rxcui', String(concept.rxcui)).limit(1).maybeSingle();
+    if (retry.error) throw retry.error;
+    if (retry.data) return retry.data;
+    throw error;
+  }
   return data;
 }
 
 async function upsertProduct(concept, ingredientId, rxSource) {
-  const { data, error } = await db.from('products').upsert({
-    name: concept.name,
-    rxcui: String(concept.rxcui),
-    tty: concept.tty || null,
-    source_id: rxSource,
-    source_updated_at: new Date().toISOString()
-  }, { onConflict: 'rxcui' }).select('id').single();
-  if (error) throw error;
-  const mapping = await db.from('product_ingredients').upsert({ product_id: data.id, ingredient_id: ingredientId }, { onConflict: 'product_id,ingredient_id' });
-  if (mapping.error) throw mapping.error;
-  return data.id;
+  const { data: existing, error: lookupError } = await db.from('products').select('id').eq('rxcui', String(concept.rxcui)).limit(1).maybeSingle();
+  if (lookupError) throw lookupError;
+  let productId = existing?.id;
+  if (!productId) {
+    const { data, error } = await db.from('products').insert({ name: concept.name, rxcui: String(concept.rxcui), tty: concept.tty || null, source_id: rxSource, source_updated_at: new Date().toISOString() }).select('id').single();
+    if (error) throw error;
+    productId = data.id;
+  }
+  const { data: mappingExists, error: mappingLookupError } = await db.from('product_ingredients').select('product_id').eq('product_id', productId).eq('ingredient_id', ingredientId).limit(1).maybeSingle();
+  if (mappingLookupError) throw mappingLookupError;
+  if (!mappingExists) {
+    const { error } = await db.from('product_ingredients').insert({ product_id: productId, ingredient_id: ingredientId });
+    if (error) throw error;
+  }
+  return productId;
 }
 
-async function upsertNemlMembership({ ingredientId, medicineName, edition, sourceId }) {
-  const payload = {
-    ingredient_id: ingredientId,
-    medicine_name: medicineName,
-    edition,
-    dosage_form: null,
-    strength: null,
-    source_id: sourceId,
-    evidence: `NEML source row: ${medicineName}`
-  };
-  const existing = await db.from('neml_memberships').select('id').eq('medicine_name', medicineName).eq('edition', edition).limit(1).maybeSingle();
-  if (existing.error) throw existing.error;
-  if (existing.data?.id) {
-    const { error } = await db.from('neml_memberships').update(payload).eq('id', existing.data.id);
+async function upsertNemlMembership(ingredientId, medicineName, sourceIdValue) {
+  const { data: existing, error: lookupError } = await db.from('neml_memberships').select('id').eq('ingredient_id', ingredientId).eq('medicine_name', medicineName).eq('edition', NEML_EDITION).limit(1).maybeSingle();
+  if (lookupError) throw lookupError;
+  const payload = { ingredient_id: ingredientId, medicine_name: medicineName, edition: NEML_EDITION, dosage_form: null, strength: null, source_id: sourceIdValue, evidence: `NEML source row: ${medicineName}` };
+  if (existing) {
+    const { error } = await db.from('neml_memberships').update(payload).eq('id', existing.id);
     if (error) throw error;
   } else {
     const { error } = await db.from('neml_memberships').insert(payload);
@@ -170,11 +160,10 @@ async function upsertNemlMembership({ ingredientId, medicineName, edition, sourc
 async function main() {
   const rxSource = await sourceId('NLM RxNorm', 'rxnorm', 'current', 'https://www.nlm.nih.gov/research/umls/rxnorm/');
   const nemlSource = await sourceId('Nigeria Essential Medicines List', 'neml', NEML_EDITION, NEML_URL);
-  await sourceId('NCBI PubMed', 'pubmed', 'E-utilities', 'https://www.ncbi.nlm.nih.gov/books/NBK25497/');
-
+  const pubmedSourceId = await sourceId('NCBI PubMed', 'pubmed', 'E-utilities', 'https://www.ncbi.nlm.nih.gov/books/NBK25497/');
   const names = await extractNemlNames();
   console.log(`NEML candidates: ${names.length}`);
-  const matched = [];
+  const matchedRxcuis = new Set();
   let membershipRows = 0;
   let productRows = 0;
 
@@ -184,16 +173,14 @@ async function main() {
       const ingredientConcept = pickIngredientConcept(concepts);
       if (!ingredientConcept) continue;
       const ingredient = await upsertIngredient(ingredientConcept, rxSource);
-      matched.push(ingredient);
-
+      matchedRxcuis.add(String(ingredient.rxcui));
       const directProducts = concepts.filter(c => ['SCD', 'SBD', 'GPCK', 'BPCK'].includes(c.tty)).slice(0, MAX_PRODUCTS_PER_MEDICINE);
       const productConcepts = directProducts.length ? directProducts : await rxnormProducts(ingredient.rxcui);
       for (const product of productConcepts) {
         await upsertProduct(product, ingredient.id, rxSource);
         productRows++;
       }
-
-      await upsertNemlMembership({ ingredientId: ingredient.id, medicineName: nemlName, edition: NEML_EDITION, sourceId: nemlSource });
+      await upsertNemlMembership(ingredient.id, nemlName, nemlSource);
       membershipRows++;
     } catch (error) {
       console.warn(`Skipping NEML item ${nemlName}: ${error.message}`);
@@ -203,9 +190,6 @@ async function main() {
 
   const { data: pairs, error: pairError } = await db.from('drug_interactions').select('id,ingredient_a_id,ingredient_b_id').limit(MAX_INTERACTION_PAIRS);
   if (pairError) throw pairError;
-  const pubmedSource = await db.from('drug_sources').select('id').eq('source_name', 'NCBI PubMed').order('retrieved_at', { ascending: false }).limit(1).single();
-  if (pubmedSource.error) throw pubmedSource.error;
-
   let evidenceRows = 0;
   for (const pair of pairs || []) {
     const [{ data: a }, { data: b }] = await Promise.all([
@@ -225,15 +209,14 @@ async function main() {
     const summary = await json(`${EUTILS}/esummary.fcgi?${summaryParams}`);
     const rows = ids.map(pmid => {
       const item = summary?.result?.[pmid] || {};
-      return { interaction_id: pair.id, ingredient_a_id: pair.ingredient_a_id, ingredient_b_id: pair.ingredient_b_id, pmid, title: item.title || null, journal: item.fulljournalname || item.source || null, publication_year: Number((item.pubdate || '').slice(0, 4)) || null, source_id: pubmedSource.data.id, source_url: `https://pubmed.ncbi.nlm.nih.gov/${pmid}/` };
+      return { interaction_id: pair.id, ingredient_a_id: pair.ingredient_a_id, ingredient_b_id: pair.ingredient_b_id, pmid, title: item.title || null, journal: item.fulljournalname || item.source || null, publication_year: Number((item.pubdate || '').slice(0, 4)) || null, source_id: pubmedSourceId, source_url: `https://pubmed.ncbi.nlm.nih.gov/${pmid}/` };
     });
     const inserted = await db.from('interaction_evidence').upsert(rows, { onConflict: 'pmid,ingredient_a_id,ingredient_b_id' });
     if (inserted.error) throw inserted.error;
     evidenceRows += rows.length;
     await sleep(NCBI_API_KEY ? 120 : 350);
   }
-
-  console.log(JSON.stringify({ neml_candidates: names.length, neml_linked: membershipRows, rxnorm_ingredients: matched.length, rxnorm_products: productRows, curated_interaction_pairs: pairs?.length || 0, pubmed_evidence: evidenceRows }));
+  console.log(JSON.stringify({ neml_candidates: names.length, neml_linked: membershipRows, rxnorm_ingredients: matchedRxcuis.size, rxnorm_products: productRows, curated_interaction_pairs: pairs?.length || 0, pubmed_evidence: evidenceRows }));
 }
 
 main().catch(error => { console.error(error); process.exit(1); });
