@@ -56,9 +56,59 @@ async function extractNemlNames() {
   return [...new Set(text.split(/\r?\n/).map(cleanLine).filter(candidate))].slice(0, MAX_MEDICINES);
 }
 
+function normalizeRxName(value) {
+  return value
+    .toLowerCase()
+    .replace(/[×x]/g, ' ')
+    .replace(/\b\d+(?:\.\d+)?\s*(?:mg|mcg|µg|g|kg|ml|mL|iu|units?|%|mmol|mol)\b/gi, ' ')
+    .replace(/\b(?:tablet|tablets|tab|capsule|capsules|cap|injection|injectable|solution|suspension|syrup|cream|ointment|gel|drops?|inhaler|vial|ampoule|ampoules|patch|suppository|oral|iv|im|sc|po)\b/gi, ' ')
+    .replace(/[(),;:/\\]+/g, ' ')
+    .replace(/[^a-z0-9+\-. ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function rxnormQueryVariants(name) {
+  const normalized = normalizeRxName(name);
+  const words = normalized.split(' ').filter(Boolean);
+  const variants = [name.trim(), normalized];
+  if (words.length > 1) {
+    variants.push(words.slice(0, 2).join(' '));
+    variants.push(words.slice(0, 3).join(' '));
+    if (words.length > 3) variants.push(words.slice(0, 4).join(' '));
+  }
+  return [...new Set(variants.filter(v => v.length >= 3))];
+}
+
 async function rxnormSearch(name) {
-  const data = await json(`${RXNAV}/drugs.json?name=${encodeURIComponent(name)}`);
-  return (data?.drugGroup?.conceptGroup || []).flatMap(group => group.conceptProperties || []).filter(Boolean);
+  // NEML is a clinical list, so its labels commonly contain strength/form text.
+  // Try the original label and progressively normalized labels before using RxNav's
+  // approximate matcher. Only RxNorm concepts returned by NLM are persisted.
+  for (const query of rxnormQueryVariants(name)) {
+    const data = await json(`${RXNAV}/drugs.json?name=${encodeURIComponent(query)}`);
+    const concepts = (data?.drugGroup?.conceptGroup || []).flatMap(group => group.conceptProperties || []).filter(Boolean);
+    if (concepts.length) return concepts;
+  }
+
+  const approximate = await json(`${RXNAV}/approximateTerm.json?term=${encodeURIComponent(normalizeRxName(name))}&maxEntries=10`);
+  const candidates = approximate?.approximateGroup?.candidate || [];
+  const concepts = [];
+  for (const candidate of candidates) {
+    if (!candidate.rxcui) continue;
+    try {
+      const props = await json(`${RXNAV}/rxcui/${encodeURIComponent(candidate.rxcui)}/properties.json`);
+      if (props?.properties) concepts.push(props.properties);
+    } catch {
+      // Ignore an individual approximate candidate; continue with the next one.
+    }
+  }
+  return concepts;
+}
+
+function pickIngredientConcept(concepts) {
+  return concepts
+    .filter(c => ['IN', 'PIN', 'MIN'].includes(c.tty))
+    .sort((a, b) => (a.name || '').length - (b.name || '').length)[0] || null;
 }
 
 async function upsertIngredient(concept, rxSource) {
@@ -99,7 +149,7 @@ async function main() {
   for (const nemlName of names) {
     try {
       const concepts = await rxnormSearch(nemlName);
-      const ingredientConcept = concepts.find(c => ['IN', 'PIN', 'MIN'].includes(c.tty));
+      const ingredientConcept = pickIngredientConcept(concepts);
       if (!ingredientConcept) continue;
       const ingredient = await upsertIngredient(ingredientConcept, rxSource);
       matched.push(ingredient);
