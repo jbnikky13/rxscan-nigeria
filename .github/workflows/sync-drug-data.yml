@@ -21,6 +21,8 @@ jobs:
       NCBI_EMAIL: ${{ secrets.NCBI_EMAIL }}
       NCBI_API_KEY: ${{ secrets.NCBI_API_KEY }}
       MAX_MEDICINES: '1000'
+      MAX_INTERACTION_LABELS: '150'
+      MAX_INTERACTION_MATCHES_PER_LABEL: '20'
       MAX_INTERACTION_PAIRS: '500'
     steps:
       - name: Checkout
@@ -50,6 +52,9 @@ jobs:
 
       - name: Sync authoritative data
         run: npm run sync:drug-data
+
+      - name: Populate evidence-backed interactions
+        run: node scripts/populateDrugInteractions.mjs
 
       - name: Verify loaded data
         run: npm run verify:drug-data
