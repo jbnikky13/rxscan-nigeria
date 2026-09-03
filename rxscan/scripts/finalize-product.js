@@ -25,7 +25,7 @@ if (!s.includes('          <AuthoritativeDataPanel result={result} />')) {
 const oldAppState = `  const [tab, setTab] = useState(0);\n  const [history, setHistory] = useState([]);`;
 const refreshBlock = `\n\n  const refreshHistory = useCallback(async () => {\n    const scans = await getScanHistory();\n    setHistory(scans ?? []);\n  }, []);\n\n  useEffect(() => { refreshHistory(); }, [refreshHistory]);`;
 if (s.includes(oldAppState) && !s.includes('const refreshHistory = useCallback')) {
-  s = s.replace(oldAppState, newAppState = oldAppState + refreshBlock);
+  s = s.replace(oldAppState, oldAppState + refreshBlock);
 }
 
 const oldScan = `{tab === 0 && <ScannerTab onScanComplete={(r) => setHistory((h) => [r, ...h])} />}`;
