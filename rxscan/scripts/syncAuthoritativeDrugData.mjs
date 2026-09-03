@@ -38,9 +38,13 @@ async function sourceId(name, type, version, url) {
 function cleanLine(line) {
   return line.replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').replace(/^\s*\d+[.)-]?\s*/, '').trim();
 }
+
 function candidate(line) {
   if (!line || line.length < 3 || line.length > 140 || !/[A-Za-z]/.test(line)) return false;
-  return !/^(chapter|section|contents|page|table|appendix|notes?|references?|foreword|acknowledg)/i.test(line);
+  if (/^(chapter|section|contents|page|table|appendix|notes?|references?|foreword|acknowledg|all rights reserved|prof\.?|dr\.?|mrs?\.?|mr\.?)/i.test(line)) return false;
+  if (/^(cardiovascular|anti[- ]infective|gastrointestinal|central nervous|respiratory|obstetric|oncology|dermatology|ophthalmic|ear|nose|throat|blood|endocrine|mental health|immunological|musculoskeletal|nutrition|anaesthesia|antidotes)/i.test(line)) return false;
+  if (!/\b(?:mg|mcg|µg|g|kg|ml|mL|iu|units?|%|mmol|mol|tablet|tablets|capsule|capsules|injection|solution|suspension|syrup|cream|ointment|gel|drops?|inhaler|vial|ampoule|patch|suppository)\b/i.test(line)) return false;
+  return true;
 }
 
 async function extractNemlNames() {
@@ -81,9 +85,6 @@ function rxnormQueryVariants(name) {
 }
 
 async function rxnormSearch(name) {
-  // NEML is a clinical list, so its labels commonly contain strength/form text.
-  // Try the original label and progressively normalized labels before using RxNav's
-  // approximate matcher. Only RxNorm concepts returned by NLM are persisted.
   for (const query of rxnormQueryVariants(name)) {
     const data = await json(`${RXNAV}/drugs.json?name=${encodeURIComponent(query)}`);
     const concepts = (data?.drugGroup?.conceptGroup || []).flatMap(group => group.conceptProperties || []).filter(Boolean);
@@ -99,10 +100,19 @@ async function rxnormSearch(name) {
       const props = await json(`${RXNAV}/rxcui/${encodeURIComponent(candidate.rxcui)}/properties.json`);
       if (props?.properties) concepts.push(props.properties);
     } catch {
-      // Ignore an individual approximate candidate; continue with the next one.
+      // Ignore an individual approximate candidate.
     }
   }
   return concepts;
+}
+
+async function rxnormProducts(rxcui) {
+  try {
+    const data = await json(`${RXNAV}/rxcui/${encodeURIComponent(rxcui)}/related.json?tty=SCD%2BSBD%2BGPCK%2BBPCK`);
+    return (data?.relatedGroup?.conceptGroup || []).flatMap(group => group.conceptProperties || []).filter(Boolean).slice(0, MAX_PRODUCTS_PER_MEDICINE);
+  } catch {
+    return [];
+  }
 }
 
 function pickIngredientConcept(concepts) {
@@ -136,6 +146,27 @@ async function upsertProduct(concept, ingredientId, rxSource) {
   return data.id;
 }
 
+async function upsertNemlMembership({ ingredientId, medicineName, edition, sourceId }) {
+  const payload = {
+    ingredient_id: ingredientId,
+    medicine_name: medicineName,
+    edition,
+    dosage_form: null,
+    strength: null,
+    source_id: sourceId,
+    evidence: `NEML source row: ${medicineName}`
+  };
+  const existing = await db.from('neml_memberships').select('id').eq('medicine_name', medicineName).eq('edition', edition).limit(1).maybeSingle();
+  if (existing.error) throw existing.error;
+  if (existing.data?.id) {
+    const { error } = await db.from('neml_memberships').update(payload).eq('id', existing.data.id);
+    if (error) throw error;
+  } else {
+    const { error } = await db.from('neml_memberships').insert(payload);
+    if (error) throw error;
+  }
+}
+
 async function main() {
   const rxSource = await sourceId('NLM RxNorm', 'rxnorm', 'current', 'https://www.nlm.nih.gov/research/umls/rxnorm/');
   const nemlSource = await sourceId('Nigeria Essential Medicines List', 'neml', NEML_EDITION, NEML_URL);
@@ -145,6 +176,7 @@ async function main() {
   console.log(`NEML candidates: ${names.length}`);
   const matched = [];
   let membershipRows = 0;
+  let productRows = 0;
 
   for (const nemlName of names) {
     try {
@@ -154,17 +186,14 @@ async function main() {
       const ingredient = await upsertIngredient(ingredientConcept, rxSource);
       matched.push(ingredient);
 
-      const productConcepts = concepts.filter(c => ['SCD', 'SBD', 'GPCK', 'BPCK'].includes(c.tty)).slice(0, MAX_PRODUCTS_PER_MEDICINE);
-      for (const product of productConcepts) await upsertProduct(product, ingredient.id, rxSource);
+      const directProducts = concepts.filter(c => ['SCD', 'SBD', 'GPCK', 'BPCK'].includes(c.tty)).slice(0, MAX_PRODUCTS_PER_MEDICINE);
+      const productConcepts = directProducts.length ? directProducts : await rxnormProducts(ingredient.rxcui);
+      for (const product of productConcepts) {
+        await upsertProduct(product, ingredient.id, rxSource);
+        productRows++;
+      }
 
-      const membership = await db.from('neml_memberships').upsert({
-        ingredient_id: ingredient.id,
-        medicine_name: nemlName,
-        edition: NEML_EDITION,
-        source_id: nemlSource,
-        evidence: `NEML source row: ${nemlName}`
-      }, { onConflict: 'lower(medicine_name),edition,coalesce(dosage_form,\'\'),coalesce(strength,\'\')' });
-      if (membership.error) throw membership.error;
+      await upsertNemlMembership({ ingredientId: ingredient.id, medicineName: nemlName, edition: NEML_EDITION, sourceId: nemlSource });
       membershipRows++;
     } catch (error) {
       console.warn(`Skipping NEML item ${nemlName}: ${error.message}`);
@@ -172,8 +201,6 @@ async function main() {
     await sleep(75);
   }
 
-  // PubMed is evidence enrichment only. It does not create an interaction or severity classification.
-  // Existing curated interaction pairs are enriched with bibliographic evidence.
   const { data: pairs, error: pairError } = await db.from('drug_interactions').select('id,ingredient_a_id,ingredient_b_id').limit(MAX_INTERACTION_PAIRS);
   if (pairError) throw pairError;
   const pubmedSource = await db.from('drug_sources').select('id').eq('source_name', 'NCBI PubMed').order('retrieved_at', { ascending: false }).limit(1).single();
@@ -206,7 +233,7 @@ async function main() {
     await sleep(NCBI_API_KEY ? 120 : 350);
   }
 
-  console.log(JSON.stringify({ neml_candidates: names.length, neml_linked: membershipRows, rxnorm_ingredients: matched.length, curated_interaction_pairs: pairs?.length || 0, pubmed_evidence: evidenceRows }));
+  console.log(JSON.stringify({ neml_candidates: names.length, neml_linked: membershipRows, rxnorm_ingredients: matched.length, rxnorm_products: productRows, curated_interaction_pairs: pairs?.length || 0, pubmed_evidence: evidenceRows }));
 }
 
 main().catch(error => { console.error(error); process.exit(1); });
